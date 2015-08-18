@@ -1,0 +1,6 @@
+KEY_CONFIG=/usr/local/etc/ovpn/openssl.cnf
+KEY_DIR=/usr/local/etc/ovpn/keys/
+KEY_OU="Revizor"
+KEY_EXPIRE=3650
+KEY_CLIENT_DIR=/usr/local/etc/ovpn/clients/
+OVPN_DIR=/usr/local/etc/ovpn/
