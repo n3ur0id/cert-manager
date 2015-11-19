@@ -15,10 +15,11 @@ init_vars () {
 	[ -s /usr/local/etc/cert-manager.rc ] && . /usr/local/etc/cert-manager.rc
 	[ -s "${0%/*}/cert-manager.rc" ] && . ${0%/*}/cert-manager.rc 
 	[ -s ${KEY_DIR}/${VPN_SERVER}/ca.config ] && export $(_read_ca_config)
+	[ -s ${KEY_DIR}/${VPN_SERVER}/ca-config.rc ] && . ${KEY_DIR}/${VPN_SERVER}/ca-config.rc
 	set +o allexport
 	export KEY_CN=${KEY_NAME}
-	export KEY_DIR=${KEY_DIR}/${VPN_SERVER}
-	export KEY_CLIENT_DIR=${KEY_CLIENT_DIR}/${VPN_SERVER}
+	[ -n "$VPN_SERVER" ] && export KEY_DIR=${KEY_DIR}/${VPN_SERVER}
+	[ -n "$VPN_SERVER" ] && export KEY_CLIENT_DIR=${KEY_CLIENT_DIR}/${VPN_SERVER}
 }
 
 new_cert () {
@@ -54,6 +55,10 @@ revoke_cert () {
 
 send_cert () {
 	[ -z "$CM_SILENT_MODE" ] && echo "===>>> Send cert "
+	[ -n "${CLIENT_EMAIL}" ] && [ -d  ${KEY_CLIENT_DIR}/${KEY_NAME} ]  && zip --quiet -j -r /tmp/${KEY_NAME}.zip ${KEY_CLIENT_DIR}/${KEY_NAME} 
+	[ -n "${CLIENT_EMAIL}" ] && [ -f /tmp/${KEY_NAME}.zip ] \
+		&& ( cat cert-manager.tmpl; uuencode /tmp/${KEY_NAME}.zip ${KEY_NAME}.zip ) | mail -s 'ovpn client cert' ${CLIENT_EMAIL} #TODO
+	rm -f /tmp/${KEY_NAME}.zip
 }
 
 version () {
@@ -64,10 +69,14 @@ client_config () {
 	local cfg_remote cfg_port cfg_cipher
 	[ -z "$CM_SILENT_MODE" ] && echo "===>>> Client config "
 	[ ! -d  ${KEY_CLIENT_DIR}/${KEY_NAME} ] && mkdir -p ${KEY_CLIENT_DIR}/${KEY_NAME}
-	cp -a ${KEY_DIR}/${KEY_NAME}.crt ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.crt
-	cp -a ${KEY_DIR}/${KEY_NAME}.key ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.key
-	cp -a ${KEY_DIR}/ca.crt  ${KEY_CLIENT_DIR}/${KEY_NAME}/ca.crt
-	cp -a ${KEY_DIR}/dh${KEY_SIZE}.pem  ${KEY_CLIENT_DIR}/${KEY_NAME}/dh${KEY_SIZE}.pem
+#	cp -a ${KEY_DIR}/${KEY_NAME}.crt ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.crt
+#	cp -a ${KEY_DIR}/${KEY_NAME}.key ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.key
+#	cp -a ${KEY_DIR}/ca.crt  ${KEY_CLIENT_DIR}/${KEY_NAME}/ca.crt
+#	cp -a ${KEY_DIR}/dh${KEY_SIZE}.pem  ${KEY_CLIENT_DIR}/${KEY_NAME}/dh${KEY_SIZE}.pem
+	ln ${KEY_DIR}/${KEY_NAME}.crt ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.crt
+	ln ${KEY_DIR}/${KEY_NAME}.key ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.key
+	ln ${KEY_DIR}/ca.crt  ${KEY_CLIENT_DIR}/${KEY_NAME}/ca.crt
+	ln ${KEY_DIR}/dh${KEY_SIZE}.pem  ${KEY_CLIENT_DIR}/${KEY_NAME}/dh${KEY_SIZE}.pem
 
 	[ ! -f ${OVPN_DIR}/${VPN_SERVER}.conf ] && echo "===>>> Error: file ${OVPN_DIR}/${VPN_SERVER}.conf does not exists" && exit 0
 	[ -z "$cfg_remote"] && cfg_remote=`sed -n 's/^local[ ]*\(.*\)$/\1/p' ${OVPN_DIR}/${VPN_SERVER}.conf `
@@ -101,14 +110,86 @@ _EOF_
 	sed 's/$//g' ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.conf > ${KEY_CLIENT_DIR}/${KEY_NAME}/${KEY_NAME}.ovpn
 }
 
+new_ca () {
+	echo "===>>> New CA "
+	init_vars 
+	read -p "CA_NAME=" CA_NAME
+	read -p "CA_EXPIRE=" CA_EXPIRE
+	read -p "KEY_SIZE=" KEY_SIZE
+	read -p "KEY_COUNTRY=" KEY_COUNTRY
+	read -p "KEY_PROVINCE=" KEY_PROVINCE
+	read -p "KEY_CITY=" KEY_CITY
+	read -p "KEY_ORG=" KEY_ORG
+	read -p "KEY_EMAIL=" KEY_EMAIL
+	KEY_DIR_ORIG=${KEY_DIR}
+	KEY_DIR=${KEY_DIR}/${CA_NAME}
+	export KEY_DIR CA_EXPIRE KEY_SIZE KEY_COUNTRY \
+       		KEY_PROVINCE KEY_CITY KEY_ORG KEY_EMAIL ;
+
+#	export KEY_DIR
+#	export CA_EXPIRE
+#	export KEY_SIZE
+#	export KEY_COUNTRY
+#	export KEY_PROVINCE
+#	export KEY_CITY
+#	export KEY_ORG
+#	export KEY_EMAIL
+
+	while : ; do
+		echo -e "===>>> Continue if options correct [Y|n] \c"
+		read answer ; echo ''
+
+		case "$answer" in
+			[yY])   break ;;
+			[nN])   exit ;;
+	 		*)      echo "===>>> $answer is not a valid response" ;;
+		esac
+	done
+
+	[ -f  ${KEY_DIR}/ca.key ] && echo "===>>> Error: CA exists ${KEY_DIR}/ca.key " && exit 0
+	mkdir -p ${KEY_DIR}
+	touch ${KEY_DIR}/index.txt
+	echo "01" > ${KEY_DIR}/serial
+
+	openssl req -new -batch \
+		-days ${KEY_EXPIRE} -nodes -x509 \
+		-keyout ${KEY_DIR}/ca.key \
+		-out ${KEY_DIR}/ca.crt \
+		-config ${KEY_CONFIG} 
+#		-config ${KEY_CONFIG} > /dev/null 2>&1
+	
+	openssl ca -gencrl -keyfile ${KEY_DIR}/ca.key \
+		-cert ${KEY_DIR}/ca.crt \
+		-out ${KEY_DIR}/crl.pem \
+		-config ${KEY_CONFIG}
+#		-config ${KEY_CONFIG} > /dev/null 2>&1
+
+	openssl dhparam -out ${KEY_DIR}/dh${KEY_SIZE}.pem ${KEY_SIZE}
+
+	cat > ${KEY_DIR}/ca-config.rc <<_EOF_
+CA_NAME=${CA_NAME}
+CA_EXPIRE=${CA_EXPIRE}
+KEY_SIZE=${KEY_SIZE}
+KEY_CONFIG=${KEY_CONFIG}
+KEY_DIR=${KEY_DIR_ORIG}
+KEY_COUNTRY=${KEY_COUNTRY}
+KEY_PROVINCE="${KEY_PROVINCE}"
+KEY_CITY=${KEY_CITY}
+KEY_ORG=${KEY_ORG}
+KEY_EMAIL=${KEY_EMAIL}
+_EOF_
+
+	chmod 0600 ${KEY_DIR}/*
+
+}
 
 usage () {
 
 	version
 	echo ''
 	echo 'Usage:'
-	echo "Common flags: [--new] | [--revoke] | [--send] | [--silent]"
-	echo "${0##*/} [Common flags] <VPN_SERVER=srvname> <KEY_NAME=keyname>"
+	echo "Common flags: [--new] | [--newca]| [--revoke] | [--send] | [--silent]"
+	echo "${0##*/} [Common flags] <VPN_SERVER=srvname> <KEY_NAME=keyname> <CLIENT_EMAIL=email>"
 	echo ''
 	echo "${0##*/} --help"
 	echo "${0##*/} --version"
@@ -121,6 +202,7 @@ for var in "$@" ; do
 	-[A-Za-z0-9]*)		newopts="$newopts $var" ;;
 	--new)			CM_NEW_CERT=cm_new_cert
 				export CM_NEW_CERT ;;
+	--newca)		new_ca ; exit ;; 
 	--revoke)		CM_REVOKE_CERT=cm_revoke_cert
 				export CM_REVOKE_CERT ;;
 	--send)			CM_SEND_CERT=cm_send_cert
@@ -140,6 +222,8 @@ done
 set -- $newopts
 [ -n "$newopts" ] && export $newopts
 unset var newopts
+
+#[ -n "$CM_NEW_CA" ] && new_ca ; exit 0; 
 
 [ -z "$KEY_NAME" ] || [ -z "$VPN_SERVER" ]   && usage ;
 
